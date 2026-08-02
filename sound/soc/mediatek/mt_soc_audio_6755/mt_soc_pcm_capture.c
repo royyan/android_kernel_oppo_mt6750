@@ -582,7 +582,7 @@ static int mtk_capture_pcm_copy(struct snd_pcm_substream *substream,
 				DMA_Read_Ptr, Vul_Block->u4DMAReadIdx);
 		}
 
-		if (copy_to_user((void __user *)Read_Data_Ptr,
+		if (a59_copy_to_user_io((void __user *)Read_Data_Ptr,
 				 (Vul_Block->pucVirtBufAddr + DMA_Read_Ptr), read_size)) {
 
 			pr_err
@@ -619,7 +619,7 @@ static int mtk_capture_pcm_copy(struct snd_pcm_substream *substream,
 				__func__, size_1, Vul_Block->u4DataRemained,
 				DMA_Read_Ptr, Vul_Block->u4DMAReadIdx);
 		}
-		if (copy_to_user((void __user *)Read_Data_Ptr,
+		if (a59_copy_to_user_io((void __user *)Read_Data_Ptr,
 				 (Vul_Block->pucVirtBufAddr + DMA_Read_Ptr),
 				 (unsigned int)size_1)) {
 
@@ -651,7 +651,7 @@ static int mtk_capture_pcm_copy(struct snd_pcm_substream *substream,
 			     __func__, size_2, Vul_Block->u4DataRemained, DMA_Read_Ptr,
 			     Vul_Block->u4DMAReadIdx);
 		}
-		if (copy_to_user((void __user *)(Read_Data_Ptr + size_1),
+		if (a59_copy_to_user_io((void __user *)(Read_Data_Ptr + size_1),
 				 (Vul_Block->pucVirtBufAddr + DMA_Read_Ptr), size_2)) {
 
 			pr_err

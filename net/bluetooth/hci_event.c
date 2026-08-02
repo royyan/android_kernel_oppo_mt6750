@@ -2345,6 +2345,27 @@ static void hci_cmd_complete_evt(struct hci_dev *hdev, struct sk_buff *skb)
 	if (opcode != HCI_OP_NOP)
 		del_timer(&hdev->cmd_timer);
 
+	/* a59 port fix: this controller (MTK CONSYS, reached over /dev/stpbt via
+	 * a59-btbridge) answers Read_Local_Extended_Features page 0 with status 0
+	 * and a max_page of 1 or more, then rejects page 1 with 0x30 "Parameter
+	 * Out Of Mandatory Range". Its own reply contradicts itself.
+	 *
+	 * __hci_req_sync() treats any non-zero status as fatal, so init aborts and
+	 * bt_to_errno(0x30) hits its default and reports ENOSYS -- surfacing as
+	 * "Can't init device hci0: Function not implemented (38)" with the adapter
+	 * stuck DOWN and bluez reporting "No default controller available".
+	 *
+	 * Page 0 is already stored by the time this runs, so swallowing just this
+	 * error costs only the page-1 host feature bits, which this controller
+	 * does not actually implement. Matched on opcode AND status so any other
+	 * failure still aborts init.
+	 */
+	if (opcode == HCI_OP_READ_LOCAL_EXT_FEATURES && status == 0x30) {
+		BT_INFO("%s: ignoring ext features page>0 rejection (0x30)",
+			hdev->name);
+		status = 0x00;
+	}
+
 	hci_req_cmd_complete(hdev, opcode, status);
 
 	if (ev->ncmd && !test_bit(HCI_RESET, &hdev->flags)) {

@@ -26,6 +26,11 @@
 #include <linux/ethtool.h>
 #include <linux/if_vlan.h>
 #include "u_ether.h"
+/* gether_connect() sizeof()s struct rndis_packet_msg_type
+ * unconditionally, so the type must be visible even when
+ * CONFIG_USB_ETH_RNDIS is disabled. This only used to compile
+ * because ether.c included rndis.h before including u_ether.c. */
+#include "rndis.h"
 #include <trace/events/netdev_rx.h>
 
 /*

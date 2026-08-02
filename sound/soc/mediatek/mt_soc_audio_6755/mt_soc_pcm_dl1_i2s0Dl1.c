@@ -118,10 +118,12 @@ static const struct snd_kcontrol_new Audio_snd_I2S0dl1_controls[] = {
 };
 
 static struct snd_pcm_hardware mtk_I2S0dl1_hardware = {
-	.info = (SNDRV_PCM_INFO_MMAP |
-	SNDRV_PCM_INFO_INTERLEAVED |
-	SNDRV_PCM_INFO_RESUME |
-	SNDRV_PCM_INFO_MMAP_VALID),
+	/* a59 port fix: MMAP deliberately NOT advertised -- hw_params() may hand
+	 * out an ioremap'd SRAM pointer as runtime->dma_area, and the ALSA core's
+	 * default mmap fault handler calls virt_to_page() on it and panics. With
+	 * the flag gone alsa-lib uses read/write transfer, and plugins still work
+	 * through "mmap_emulation true" on the hw slave. */
+	.info = (SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_RESUME),
 	.formats =   SND_SOC_ADV_MT_FMTS,
 	.rates =        SOC_HIGH_USE_RATE,
 	.rate_min =     SOC_HIGH_USE_RATE_MIN,
@@ -598,7 +600,7 @@ static int mtk_pcm_I2S0dl1_copy(struct snd_pcm_substream *substream,
 
 				PRINTK_AUD_DL1("memcpy Idx= %p data_w_ptr = %p copy_size = 0x%x\n",
 					       Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp, data_w_ptr, copy_size);
-				if (copy_from_user((Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp), data_w_ptr,
+				if (a59_copy_from_user_io((Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp), data_w_ptr,
 						   copy_size)) {
 					PRINTK_AUDDRV(" Fail copy from user\n");
 					return -1;
@@ -630,7 +632,7 @@ static int mtk_pcm_I2S0dl1_copy(struct snd_pcm_substream *substream,
 
 				PRINTK_AUD_DL1("mcmcpy Idx= %p data_w_ptr = %p size_1 = %x\n",
 					       Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp, data_w_ptr, size_1);
-				if ((copy_from_user((Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp), data_w_ptr ,
+				if ((a59_copy_from_user_io((Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp), data_w_ptr ,
 						    size_1))) {
 					PRINTK_AUDDRV(" Fail 1 copy from user");
 					return -1;
@@ -653,7 +655,7 @@ static int mtk_pcm_I2S0dl1_copy(struct snd_pcm_substream *substream,
 				PRINTK_AUD_DL1("mcmcpy Idx= %p data_w_ptr+size_1 = %p size_2 = %x\n",
 					       Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp,
 					       data_w_ptr + size_1, size_2);
-				if ((copy_from_user((Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp),
+				if ((a59_copy_from_user_io((Afe_Block->pucVirtBufAddr + Afe_WriteIdx_tmp),
 						    (data_w_ptr + size_1), size_2))) {
 					PRINTK_AUDDRV("AudDrv_write Fail 2  copy from user");
 					return -1;

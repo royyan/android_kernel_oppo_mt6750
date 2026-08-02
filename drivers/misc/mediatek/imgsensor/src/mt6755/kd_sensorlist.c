@@ -3030,19 +3030,39 @@ bool Get_Cam_Regulator(void)
 		node = of_find_compatible_node(NULL, NULL, "mediatek,camera_hw");
 
 		if (node) {
+			/* a59 port fix: attach the camera_hw DT node to the device we
+			 * are about to resolve supplies against.
+			 *
+			 * sensor_device comes from device_create() -- a class device
+			 * with no parent and no of_node. regulator_get() resolves
+			 * "<name>-supply" by walking dev->of_node, so against that
+			 * device it can never see the vcama/vcamd/vcamio supplies that
+			 * this very node declares, and every rail stayed off.
+			 *
+			 * The node was already found on the line above and then simply
+			 * not used; borrow it here. */
+			if (sensor_device && !sensor_device->of_node) {
+				sensor_device->of_node = node;
+				pr_err("[a59] camera: attached camera_hw of_node for regulator lookup\n");
+			}
 			/* name = of_get_property(node, "MAIN_CAMERA_POWER_A", NULL); */
 			 regSubVCAMD = regulator_get(sensor_device, "vcamd_sub"); /*check customer definition*/
-			if (regSubVCAMD == NULL) {
-			    if (regVCAMA == NULL) {
+			/* a59 port fix: regulator_get() returns a valid pointer or an
+			 * ERR_PTR, NEVER NULL. This board has no vcamd_sub-supply in DT, so
+			 * the get above yields an error pointer, "== NULL" is false, and the
+			 * whole block below was skipped -- leaving regVCAMA/regVCAMD/regVCAMIO
+			 * NULL forever and every sensor unpowered. */
+			if (IS_ERR_OR_NULL(regSubVCAMD)) {
+			    if (IS_ERR_OR_NULL(regVCAMA)) {
 				    regVCAMA = regulator_get(sensor_device, "vcama");
 			    }
-			    if (regVCAMD == NULL) {
+			    if (IS_ERR_OR_NULL(regVCAMD)) {
 				    regVCAMD = regulator_get(sensor_device, "vcamd");
 			    }
-			    if (regVCAMIO == NULL) {
+			    if (IS_ERR_OR_NULL(regVCAMIO)) {
 				    regVCAMIO = regulator_get(sensor_device, "vcamio");
 			    }
-			    if (regVCAMAF == NULL) {
+			    if (IS_ERR_OR_NULL(regVCAMAF)) {
 				    regVCAMAF = regulator_get(sensor_device, "vcamaf");
 			    }
 			} else{
@@ -3053,22 +3073,22 @@ bool Get_Cam_Regulator(void)
 				/* if customer defined, get customized camera regulator node */
 				sensor_device->of_node = of_find_compatible_node(NULL, NULL, "mediatek,camera_hw");
 
-			    if (regVCAMA == NULL) {
+			    if (IS_ERR_OR_NULL(regVCAMA)) {
 				    regVCAMA = regulator_get(sensor_device, "vcama");
 			    }
-			    if (regVCAMD == NULL) {
+			    if (IS_ERR_OR_NULL(regVCAMD)) {
 				    regVCAMD = regulator_get(sensor_device, "vcamd");
 			    }
-				if (regSubVCAMD == NULL) {
+				if (IS_ERR_OR_NULL(regSubVCAMD)) {
 				    regSubVCAMD = regulator_get(sensor_device, "vcamd_sub");
 			    }
-			    if (regVCAMIO == NULL) {
+			    if (IS_ERR_OR_NULL(regVCAMIO)) {
 				    regVCAMIO = regulator_get(sensor_device, "vcamio");
 			    }
-			    if (regVCAMAF == NULL) {
+			    if (IS_ERR_OR_NULL(regVCAMAF)) {
 				    regVCAMAF = regulator_get(sensor_device, "vcamaf");
 			    }
-			    if (regMain2VCAMD == NULL) {
+			    if (IS_ERR_OR_NULL(regMain2VCAMD)) {
 				    regMain2VCAMD = regulator_get(sensor_device, "vcamd_main2");
 			    }
 			    /* restore original dev.of_node */
@@ -3106,7 +3126,9 @@ bool _hwPowerOn(PowerType type, int powerVolt)
     } else
     	return ret;
 
-	if (!IS_ERR(reg)) {
+	/* a59 port fix: IS_ERR(NULL) is false, so a NULL handle used to sail
+	 * through here and get passed to regulator_set_voltage(). Reject both. */
+	if (!IS_ERR_OR_NULL(reg)) {
 		if (regulator_set_voltage(reg , powerVolt, powerVolt) != 0) {
 			PK_DBG("[_hwPowerOn]fail to regulator_set_voltage, powertype:%d powerId:%d\n", type, powerVolt);
 			return ret;

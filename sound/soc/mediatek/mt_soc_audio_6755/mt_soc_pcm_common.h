@@ -213,4 +213,10 @@ unsigned long audio_bytes_to_frame(struct snd_pcm_substream *substream, unsigned
 
 extern void *AFE_BASE_ADDRESS;
 
+
+/* a59 port fix: SRAM-safe user copies, see mt_soc_pcm_common.c */
+extern const char a59_audio_fix_marker[];
+unsigned long a59_copy_from_user_io(void *dst, const void __user *src, unsigned long n);
+unsigned long a59_copy_to_user_io(void __user *dst, const void *src, unsigned long n);
+
 #endif

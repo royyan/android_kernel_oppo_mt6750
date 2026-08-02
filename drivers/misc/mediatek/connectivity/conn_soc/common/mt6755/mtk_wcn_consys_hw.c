@@ -350,6 +350,167 @@ INT32 mtk_wcn_consys_co_clock_type(VOID)
 	return co_clock_type;
 }
 
+
+/* a59 port fix: bring the CONSYS power domain up by hand.
+ *
+ * The compiled path here is CONSYS_PWR_ON_OFF_API_AVALIABLE=1 with
+ * CONFIG_MTK_CLKMGR unset, so all it does is clk_prepare_enable(clk_scp_conn_main)
+ * and then poll the chip ID. That clock is <&scpsys SCP_SYS_CONN> (DT
+ * clock-names = "conn"), and it does not work on this port: a kernel module
+ * sampling TOP1_PWR_CTRL, PWR_CONN_ACK/_S, TOPAXI_PROT_EN/STA1, INFRA_PDN_STA0
+ * and CPU_SW_RST every 2 ms across an entire bring-up attempt recorded 3000
+ * samples and exactly ONE distinct state -- nothing moved at all. The domain
+ * stayed off (pwr_on=0, ISO asserted, clk_dis=1), AXI bus protection stayed
+ * enabled and the CONNMCU bus clock stayed gated, so every CONSYS register read
+ * returned 0x00000000.
+ *
+ * Two reasons, both in drivers/clk/mediatek/clk-mt6755-pg.c: the live CONN
+ * subsys entry declares .bus_prot_mask = 0 (so nothing ever drops CONSYS's AXI
+ * protection, even though CONN_PROT_MASK is defined right there), and the
+ * complete, correct spm_mtcmos_ctrl_connsys() is dead code -- only reachable
+ * from an "#if 0" block guarded by MT_CCF_BRINGUP.
+ *
+ * The vendor's own manual sequence exists in the #else half of this function but
+ * is not compiled, and it spins on bare `while` loops with no bound, which would
+ * hang the boot if an ack never arrives. This is that sequence with bounded
+ * waits, plus two steps it omits:
+ *
+ *   - clearing CONSYS_SRAM_CONN_PD_BIT. That macro is defined in the header and
+ *     referenced NOWHERE in the tree, so CONSYS SRAM stays powered down. With it
+ *     set the chip reports its ID but the CONSYS CPU has no memory to execute
+ *     from, which is consistent with the observed STP silence
+ *     ("wmt_core_hw_check: get hwcode (chip id) fail").
+ *   - ungating INFRA CONNMCU_BUS, the AP<->CONSYS bus clock. The infra gate
+ *     table in clk-mt6755.c is behind "#if 0" in this tree, so nothing enables it.
+ *
+ * Verified from a module doing exactly this: CHIP_ID goes 0x00000000 -> 0x0326.
+ *
+ * Note conn_reg.topckgen_base is 0x10000000 despite the name (the DT reg entry
+ * is <0x10000000 0x2000>), which is why the INFRA offsets below are relative
+ * to it -- same base the existing TOPAXI_PROT accesses use.
+ */
+#define A59_INFRA_PDN_CLR0		0x1084
+#define A59_INFRA_PDN_STA0		0x1090
+#define A59_CONNMCU_BUS_BIT		(0x1 << 15)
+#define A59_POLL_LIMIT			2000	/* x 10us = 20ms */
+
+#define A59_SPM(off)	(conn_reg.spm_base + (off))
+#define A59_INFRA(off)	(conn_reg.topckgen_base + (off))
+
+static VOID mtk_wcn_consys_a59_power_up(VOID)
+{
+	INT32 i;
+	UINT32 v;
+
+	/* 1. conn_top1_pwr_on = 1, wait for ack */
+	CONSYS_REG_WRITE(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET),
+			 CONSYS_REG_READ(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET)) |
+			 CONSYS_SPM_PWR_ON_BIT);
+	for (i = 0; i < A59_POLL_LIMIT; i++) {
+		if (CONSYS_REG_READ(A59_SPM(CONSYS_PWR_CONN_ACK_OFFSET)) & CONSYS_PWR_ON_ACK_BIT)
+			break;
+		udelay(10);
+	}
+	if (i == A59_POLL_LIMIT)
+		WMT_PLAT_ERR_FUNC("a59: PWR_ON ack timeout\n");
+
+	/* 2. conn_top1_pwr_on_s = 1, conn_clk_dis = 0, wait for ack_s */
+	CONSYS_REG_WRITE(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET),
+			 CONSYS_REG_READ(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET)) |
+			 CONSYS_SPM_PWR_ON_S_BIT);
+	CONSYS_REG_WRITE(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET),
+			 CONSYS_REG_READ(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET)) &
+			 ~CONSYS_CLK_CTRL_BIT);
+	udelay(10);
+	for (i = 0; i < A59_POLL_LIMIT; i++) {
+		if (CONSYS_REG_READ(A59_SPM(CONSYS_PWR_CONN_ACK_S_OFFSET)) & CONSYS_PWR_CONN_ACK_S_BIT)
+			break;
+		udelay(10);
+	}
+	if (i == A59_POLL_LIMIT)
+		WMT_PLAT_ERR_FUNC("a59: PWR_ON_S ack timeout\n");
+
+	/* 3. release ISO, release connsys SW reset, power up CONSYS SRAM */
+	CONSYS_REG_WRITE(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET),
+			 CONSYS_REG_READ(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET)) &
+			 ~CONSYS_SPM_PWR_ISO_S_BIT);
+	CONSYS_REG_WRITE(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET),
+			 CONSYS_REG_READ(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET)) |
+			 CONSYS_SPM_PWR_RST_BIT);
+	CONSYS_REG_WRITE(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET),
+			 CONSYS_REG_READ(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET)) &
+			 ~CONSYS_SRAM_CONN_PD_BIT);
+	udelay(10);
+
+	/* 4. drop AXI bus protection so the CONSYS bus is reachable */
+	CONSYS_REG_WRITE(A59_INFRA(CONSYS_TOPAXI_PROT_EN_OFFSET),
+			 CONSYS_REG_READ(A59_INFRA(CONSYS_TOPAXI_PROT_EN_OFFSET)) &
+			 ~CONSYS_PROT_MASK);
+	for (i = 0; i < A59_POLL_LIMIT; i++) {
+		if (!(CONSYS_REG_READ(A59_INFRA(CONSYS_TOPAXI_PROT_STA1_OFFSET)) & CONSYS_PROT_MASK))
+			break;
+		udelay(10);
+	}
+	if (i == A59_POLL_LIMIT)
+		WMT_PLAT_ERR_FUNC("a59: TOPAXI protection did not clear\n");
+
+	/* 5. ungate the AP<->CONSYS bus clock */
+	CONSYS_REG_WRITE(A59_INFRA(A59_INFRA_PDN_CLR0), A59_CONNMCU_BUS_BIT);
+	udelay(10);
+
+	/* a59 port fix (consys-cpurst-v1): release the CONSYS CPU reset here.
+	 *
+	 * mtk_wcn_consys_hw_reg_ctrl() asserts CONSYS_CPU_SW_RST at its step 3,
+	 * before this helper runs, and only releases it at step 16 -- which is
+	 * AFTER the chip-ID poll. So the poll reads 0x00000000 even once the power
+	 * domain, ISO, bus protection and SRAM are all correct. A module running
+	 * this same sequence but releasing the reset first read the expected
+	 * 0x0326, which is exactly this difference. Step 16 repeats the write; it
+	 * is idempotent, and the 0x88 key in [31:24] is required for the register
+	 * to accept it at all.
+	 */
+	CONSYS_REG_WRITE(conn_reg.ap_rgu_base + CONSYS_CPU_SW_RST_OFFSET,
+			 (CONSYS_REG_READ(conn_reg.ap_rgu_base + CONSYS_CPU_SW_RST_OFFSET) &
+			  ~CONSYS_CPU_SW_RST_BIT) | CONSYS_CPU_SW_RST_CTRL_KEY);
+	udelay(50);
+
+	/* a59 port fix (consys-chipid-wait-v1): do not hand back until the chip
+	 * actually answers.
+	 *
+	 * With the power sequence above correct, a module reading CONSYS CHIP_ID
+	 * from an idle system gets 0x0326 -- but the driver's own poll immediately
+	 * after this helper was still reading 0x00000000 on every boot attempt. The
+	 * chip needs longer to come up than udelay(50). The driver then went on to
+	 * drive STP against a chip that was not answering yet, which is exactly why
+	 * the firmware download timed out waiting for WMT_PATCH_EVT: TX succeeded,
+	 * nothing ever came back.
+	 *
+	 * Poll here instead of guessing a delay, bounded so a genuinely dead chip
+	 * cannot hang the boot.
+	 */
+	{
+		INT32 w;
+		UINT32 id = 0;
+
+		for (w = 0; w < 200; w++) {	/* 200 x 5ms = 1s ceiling */
+			id = CONSYS_REG_READ(conn_reg.mcu_base + CONSYS_CHIP_ID_OFFSET);
+			if (id == 0x0326)
+				break;
+			mdelay(5);
+		}
+		WMT_PLAT_ERR_FUNC("a59: CHIP_ID=0x%08x after %dms%s\n",
+				  id, w * 5, (id == 0x0326) ? "" : " (TIMEOUT)");
+	}
+
+	v = CONSYS_REG_READ(A59_SPM(CONSYS_TOP1_PWR_CTRL_OFFSET));
+	WMT_PLAT_ERR_FUNC("a59: PWR_CTRL=0x%08x (pwr_on=%u on_s=%u iso=%u rst=%u clkdis=%u sram_pd=%u) prot=0x%x connmcu_gated=%u\n",
+			  v, !!(v & CONSYS_SPM_PWR_ON_BIT), !!(v & CONSYS_SPM_PWR_ON_S_BIT),
+			  !!(v & CONSYS_SPM_PWR_ISO_S_BIT), !!(v & CONSYS_SPM_PWR_RST_BIT),
+			  !!(v & CONSYS_CLK_CTRL_BIT), !!(v & CONSYS_SRAM_CONN_PD_BIT),
+			  CONSYS_REG_READ(A59_INFRA(CONSYS_TOPAXI_PROT_STA1_OFFSET)) & CONSYS_PROT_MASK,
+			  !!(CONSYS_REG_READ(A59_INFRA(A59_INFRA_PDN_STA0)) & A59_CONNMCU_BUS_BIT));
+}
+
 INT32 mtk_wcn_consys_hw_reg_ctrl(UINT32 on, UINT32 co_clock_type)
 {
 
@@ -473,6 +634,8 @@ INT32 mtk_wcn_consys_hw_reg_ctrl(UINT32 on, UINT32 co_clock_type)
 		if (iRet)
 			WMT_PLAT_ERR_FUNC("clk_prepare_enable(clk_scp_conn_main) fail(%d)\n", iRet);
 		WMT_PLAT_DBG_FUNC("clk_prepare_enable(clk_scp_conn_main) ok\n");
+		/* a59 port fix: scpsys did not power the domain -- do it here. */
+		mtk_wcn_consys_a59_power_up();
 #endif /* defined(CONFIG_MTK_LEGACY) */
 #else
 		/*2.write conn_top1_pwr_on=1, power on conn_top1 0x1000632c [2]  1'b1 */
